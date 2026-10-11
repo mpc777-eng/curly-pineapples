@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Curly's Pineapples</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Curly">
+<meta name="theme-color" content="#8fd3ff">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#8fd3ff;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  canvas{display:block;width:100vw;height:100vh}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(#8fd3ff,#c9f0c0);font-family:"Chalkboard SE","Comic Sans MS",system-ui,sans-serif;z-index:5}
+  #start h1{font-size:9vmin;margin:0 0 2vmin;color:#2b4a1e;text-align:center}
+  #start .big{font-size:22vmin;line-height:1}
+  #play{margin-top:4vmin;font-size:8vmin;padding:2vmin 8vmin;border:none;border-radius:6vmin;background:#ffcc33;color:#5a3a00;box-shadow:0 1.2vmin 0 #c99400;font-family:inherit}
+  #play:active{transform:translateY(1vmin);box-shadow:0 .2vmin 0 #c99400}
+</style>
+</head>
+<body>
+<div id="start">
+  <div class="big">🍍🐶</div>
+  <h1>Curly's Pineapples</h1>
+  <button id="play">▶ Play</button>
+</div>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+const W = 1024, H = 768, GROUND = 610;
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+let scale = 1, offX = 0, offY = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  scale = Math.min(innerWidth / W, innerHeight / H);
+  offX = (innerWidth - W * scale) / 2; offY = (innerHeight - H * scale) / 2;
+  ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offX, dpr * offY);
+}
+addEventListener("resize", resize); resize();
+
+// ---------- sound and voice ----------
+let ac = null;
+function tone(freq, dur, type = "sine", vol = 0.25, slide = 0, delay = 0) {
+  if (!ac) return;
+  const t = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  pop: () => { tone(500, 0.12, "sine", 0.3, 500); },
+  nom: () => { tone(220, 0.08, "square", 0.08); tone(180, 0.08, "square", 0.08, 0, 0.1); },
+  plop: () => { tone(300, 0.35, "sine", 0.35, -230); tone(120, 0.25, "triangle", 0.2, -40, 0.15); },
+  clang: () => { tone(700, 0.3, "triangle", 0.25, -200); tone(1050, 0.2, "triangle", 0.12, 0, 0.05); },
+  woof: () => { tone(420, 0.12, "sawtooth", 0.12, -200); tone(380, 0.12, "sawtooth", 0.12, -180, 0.18); },
+  yay: () => { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, "triangle", 0.2, 0, i * 0.12)); },
+  step: () => { tone(160, 0.04, "sine", 0.05); },
+};
+let lastSay = "";
+function say(text) {
+  lastSay = text; message = text;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text.replace(/[^\w\s!?,.']/g, ""));
+    u.lang = "en-US"; u.rate = 0.92; u.pitch = 1.2;
+    const v = speechSynthesis.getVoices().find(v => /Samantha|Karen|Moira|Tessa|Google US English/.test(v.name));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+// ---------- the world ----------
+const TREE_X = 200;
+const SPOTS = [[120, 300], [270, 290], [160, 390], [265, 385]];
+let treePines = [];          // pineapples on the tree
+let flyers = [];             // things flying through the air
+let particles = [];
+let message = "";
+let state = "start";
+let basket = 0;              // pineapples the lady is carrying
+const lady = { x: 520, tx: 520, dir: 1, walk: 0, cb: null, eat: 0, eating: false, holdPoo: false, chew: 0 };
+const curly = { x: 760, tx: 760, dir: -1, walk: 0, cb: null, wag: 0, bowl: [], eatT: 0, happy: 0, jump: 0 };
+const trash = { x: 940, lid: 0 };
+let poo = null;              // {x, y, held}
+let waitTimer = 0, yayTimer = 0;
+const BOWL_X = () => curly.x - 70;
+
+function growPineapples() {
+  treePines = SPOTS.map(([x, y], i) => ({ x, y, s: 0, delay: i * 0.35 }));
+}
+
+function ladyGo(x, cb) { lady.tx = Math.max(70, Math.min(960, x)); lady.cb = cb || null; }
+function curlyGo(x, cb) { curly.tx = Math.max(380, Math.min(880, x)); curly.cb = cb || null; }
+
+function fly(emoji, x0, y0, x1, y1, dur, size, cb) {
+  flyers.push({ emoji, x0, y0, x1, y1, t: 0, dur, size, cb });
+}
+function burst(x, y, n = 18, colors = ["#ffd23f", "#ff6b9a", "#5ad1ff", "#7be06b", "#ffffff"]) {
+  for (let i = 0; i < n; i++) particles.push({
+    x, y, vx: (Math.random() - 0.5) * 500, vy: -Math.random() * 500 - 100,
+    life: 1.2 + Math.random() * 0.6, c: colors[i % colors.length], r: 5 + Math.random() * 6
+  });
+}
+
+function setState(s) {
+  state = s;
+  if (s === "pick") say(basket === 0 ? "Let's pick pineapples! Tap a pineapple on the tree." : "");
+  if (s === "give") say("Four pineapples! Now give three to Curly. Tap Curly!");
+  if (s === "ladyEat") say("Yum! Now you eat your pineapple. Tap your pineapple!");
+  if (s === "poo") say("Uh oh! Curly went poo! Tap the poo to pick it up.");
+  if (s === "trash") say("Now throw it in the trash. Tap the trash can!");
+}
+
+// ---------- tapping ----------
+function toWorld(e) {
+  return { x: (e.clientX - offX) / scale, y: (e.clientY - offY) / scale };
+}
+const near = (p, x, y, r) => Math.hypot(p.x - x, p.y - y) < r;
+
+cv.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  const p = toWorld(e);
+  // speaker button repeats the instruction
+  if (near(p, W - 60, 60, 45)) { say(lastSay || message); return; }
+  if (lady.cb) return; // busy walking to do something
+
+  if (state === "pick") {
+    const pine = treePines.find(t => t.s >= 1 && near(p, t.x, t.y, 60));
+    if (pine) {
+      ladyGo(pine.x + 110, () => {
+        treePines.splice(treePines.indexOf(pine), 1);
+        sfx.pop();
+        fly("🍍", pine.x, pine.y, lady.x + 30, GROUND - 95, 0.45, 56, () => {
+          basket++; burst(lady.x + 30, GROUND - 95, 8);
+          if (basket === 4) setState("give");
+          else say(["One!", "Two!", "Three!"][basket - 1] + (basket === 1 ? " Pick another one!" : ""));
+        });
+      });
+      return;
+    }
+  }
+  if (state === "give" && near(p, curly.x, GROUND - 50, 110)) {
+    ladyGo(curly.x - 170, () => {
+      lady.dir = 1;
+      for (let i = 0; i < 3; i++) {
+        setTimeout(() => {
+          sfx.pop(); basket--;
+          fly("🍍", lady.x + 30, GROUND - 95, BOWL_X() - 22 + i * 22, GROUND - 20, 0.5, 44, () => {
+            curly.bowl.push({ s: 1 });
+            if (curly.bowl.length === 3) { sfx.woof(); curly.jump = 1; curly.eatT = 0; }
+          });
+        }, i * 350);
+      }
+      setTimeout(() => setState("ladyEat"), 1300);
+    });
+    return;
+  }
+  if (state === "ladyEat" && !lady.eating && basket === 1 && near(p, lady.x + 30, GROUND - 100, 90)) {
+    lady.eating = true; lady.eat = 1;
+    return;
+  }
+  if (state === "poo" && poo && !poo.held && near(p, poo.x, poo.y, 80)) {
+    ladyGo(poo.x + (lady.x < poo.x ? -60 : 60), () => {
+      poo.held = true; lady.holdPoo = true; sfx.pop();
+      setState("trash");
+    });
+    return;
+  }
+  if (state === "trash" && near(p, trash.x, GROUND - 70, 100)) {
+    ladyGo(trash.x - 140, () => {
+      lady.dir = 1; lady.holdPoo = false; trash.lid = 1;
+      fly("💩", lady.x + 35, GROUND - 100, trash.x, GROUND - 150, 0.6, 50, () => {
+        poo = null; sfx.clang(); setTimeout(() => sfx.yay(), 250);
+        burst(trash.x, GROUND - 160, 40); burst(lady.x, GROUND - 200, 30);
+        say("Great job! You're such a good helper! Curly loves you!");
+        state = "yay"; yayTimer = 4.5; curly.happy = 3; curly.jump = 1;
+      });
+    });
+    return;
+  }
+  // otherwise, tap the ground to walk there
+  if (p.y > GROUND - 260 && !lady.eating) ladyGo(p.x);
+});
+
+// ---------- update ----------
+let lastT = performance.now();
+function update(dt) {
+  // walking
+  for (const a of [lady, curly]) {
+    const d = a.tx - a.x;
+    if (Math.abs(d) > 3) {
+      const sp = a === lady ? 280 : 200;
+      a.x += Math.sign(d) * Math.min(Math.abs(d), sp * dt);
+      a.dir = Math.sign(d); a.walk += dt * 10;
+      if (a === lady && Math.floor(a.walk / Math.PI) !== Math.floor((a.walk - dt * 10) / Math.PI)) sfx.step();
+    } else if (a.cb) { const cb = a.cb; a.cb = null; cb(); }
+    else a.walk = 0;
+  }
+  // pineapples grow on the tree
+  for (const t of treePines) {
+    if (t.delay > 0) { t.delay -= dt; continue; }
+    if (t.s < 1) { const was = t.s; t.s = Math.min(1, t.s + dt * 2.5); if (was === 0) sfx.pop(); }
+  }
+  // flying things
+  for (const f of flyers) {
+    f.t += dt / f.dur;
+    if (f.t >= 1 && !f.done) { f.done = true; f.cb && f.cb(); }
+  }
+  flyers = flyers.filter(f => !f.done);
+  // lady eats
+  if (lady.eating) {
+    const before = lady.eat;
+    lady.eat -= dt / 2.4; lady.chew += dt;
+    if (Math.floor(before * 5) !== Math.floor(lady.eat * 5)) sfx.nom();
+    if (lady.eat <= 0) { lady.eating = false; lady.eat = 0; basket = 0; burst(lady.x + 20, GROUND - 160, 10); say("Mmm, yummy!"); }
+  }
+  // Curly eats his three, one at a time
+  if (curly.bowl.length === 3 || curly.bowl.some(b => b.s > 0)) {
+    const cur = curly.bowl.find(b => b.s > 0);
+    if (cur) {
+      const before = cur.s;
+      cur.s -= dt / 1.6;
+      if (Math.floor(before * 4) !== Math.floor(cur.s * 4)) sfx.nom();
+      if (cur.s <= 0) { cur.s = 0; sfx.woof(); }
+    }
+  }
+  const curlyDone = curly.bowl.length === 3 && curly.bowl.every(b => b.s <= 0);
+  if (state === "ladyEat" && curlyDone && basket === 0 && !lady.eating) {
+    state = "pooWait"; waitTimer = 1.2;
+  }
+  if (state === "pooWait") {
+    waitTimer -= dt;
+    if (waitTimer <= 0 && !poo) {
+      curly.bowl = [];
+      poo = { x: curly.x + 70, y: GROUND - 10, held: false, s: 0 };
+      sfx.plop(); curly.jump = 1;
+      curlyGo(430);
+      setState("poo");
+    }
+  }
+  if (poo) {
+    poo.s = Math.min(1, poo.s + dt * 3);
+    if (poo.held) { poo.x = lady.x + 35 * lady.dir; poo.y = GROUND - 100; }
+  }
+  if (state === "yay") {
+    yayTimer -= dt;
+    if (Math.random() < dt * 6) burst(100 + Math.random() * 824, 150 + Math.random() * 200, 6);
+    if (yayTimer <= 0) { curlyGo(760); growPineapples(); setState("pick"); }
+  }
+  trash.lid = Math.max(0, trash.lid - dt * 0.8);
+  curly.wag += dt * (curly.happy > 0 || state === "give" ? 22 : 8);
+  curly.happy = Math.max(0, curly.happy - dt);
+  curly.jump = Math.max(0, curly.jump - dt * 2.5);
+  for (const p of particles) { p.vy += 900 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+}
+
+// ---------- drawing ----------
+function emoji(ch, x, y, size, rot = 0) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.font = `${size}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(ch, 0, 0); ctx.restore();
+}
+function circle(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+function ellipse(x, y, rx, ry, c, rot = 0) { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); ctx.fill(); }
+
+function drawBackground(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, GROUND);
+  g.addColorStop(0, "#7cc8ff"); g.addColorStop(1, "#d4f1ff");
+  ctx.fillStyle = g; ctx.fillRect(-500, -500, W + 1000, GROUND + 500);
+  circle(880, 110, 55, "#ffe46b"); circle(880, 110, 70, "rgba(255,228,107,0.3)");
+  for (const [cx, cy, s] of [[420, 110, 1], [650, 180, 0.8], [140, 90, 0.7]]) {
+    const x = (cx + t * 12 * s) % (W + 300) - 150;
+    for (const [dx, dy, r] of [[0, 0, 38], [40, -12, 46], [85, 0, 36], [42, 14, 34]]) circle(x + dx * s, cy + dy * s, r * s, "#fff");
+  }
+  ellipse(250, GROUND + 30, 600, 140, "#9be27a"); ellipse(850, GROUND + 40, 500, 130, "#8fd86c");
+  ctx.fillStyle = "#7ccc5a"; ctx.fillRect(-500, GROUND, W + 1000, H - GROUND + 500);
+  for (let i = 0; i < 26; i++) { const fx = (i * 97) % W + 20, fy = GROUND + 30 + (i * 53) % 110;
+    circle(fx, fy, 6, ["#ff8fb3", "#fff", "#ffd23f"][i % 3]); circle(fx, fy, 2.5, "#ffb000"); }
+}
+
+function drawTree() {
+  ctx.fillStyle = "#8a5a2b";
+  ctx.beginPath(); ctx.moveTo(TREE_X - 30, GROUND); ctx.lineTo(TREE_X - 18, 380); ctx.lineTo(TREE_X + 18, 380); ctx.lineTo(TREE_X + 30, GROUND); ctx.fill();
+  for (const [dx, dy, r] of [[0, -20, 130], [-90, 40, 90], [90, 40, 95], [-40, 90, 80], [50, 95, 80], [0, -110, 85]])
+    circle(TREE_X + dx, 330 + dy - 30, r, "#3fae4a");
+  for (const [dx, dy, r] of [[-30, -60, 50], [60, -20, 40], [-80, 30, 35]]) circle(TREE_X + dx, 330 + dy - 30, r, "#55c25d");
+  for (const p of treePines) if (p.delay <= 0 && p.s > 0) emoji("🍍", p.x, p.y, 62 * p.s);
+}
+
+function drawTrash() {
+  const x = trash.x, y = GROUND;
+  ctx.fillStyle = "#2f8f5b";
+  ctx.beginPath(); ctx.moveTo(x - 50, y - 130); ctx.lineTo(x + 50, y - 130); ctx.lineTo(x + 40, y); ctx.lineTo(x - 40, y); ctx.fill();
+  ctx.strokeStyle = "#226d44"; ctx.lineWidth = 5;
+  for (const dx of [-22, 0, 22]) { ctx.beginPath(); ctx.moveTo(x + dx, y - 115); ctx.lineTo(x + dx * 0.85, y - 15); ctx.stroke(); }
+  ctx.save(); ctx.translate(x + 55, y - 132); ctx.rotate(-trash.lid * 1.1);
+  ctx.fillStyle = "#3aa86c"; ctx.fillRect(-112, -14, 114, 16); ctx.fillRect(-70, -26, 30, 14); ctx.restore();
+}
+
+function drawLady() {
+  const bob = lady.walk ? Math.abs(Math.sin(lady.walk)) * 6 : 0;
+  const x = lady.x, y = GROUND - bob, d = lady.dir;
+  const leg = lady.walk ? Math.sin(lady.walk) * 14 : 0;
+  ellipse(x, GROUND + 4, 45, 9, "rgba(0,0,0,0.15)");
+  ctx.strokeStyle = "#e8b48a"; ctx.lineWidth = 10; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(x - 12, y - 60); ctx.lineTo(x - 12 + leg, y - 6); ctx.moveTo(x + 12, y - 60); ctx.lineTo(x + 12 - leg, y - 6); ctx.stroke();
+  ellipse(x - 12 + leg, y - 4, 13, 7, "#d6336c"); ellipse(x + 12 - leg, y - 4, 13, 7, "#d6336c");
+  // dress
+  ctx.fillStyle = "#ff6fa5";
+  ctx.beginPath(); ctx.moveTo(x - 24, y - 150); ctx.lineTo(x + 24, y - 150); ctx.lineTo(x + 50, y - 55); ctx.lineTo(x - 50, y - 55); ctx.fill();
+  for (const [dx, dy] of [[-20, -80], [15, -100], [25, -70], [-5, -125]]) circle(x + dx, y + dy, 5, "#fff");
+  // arms
+  const armUp = basket > 0 || lady.holdPoo || lady.eating;
+  ctx.strokeStyle = "#e8b48a"; ctx.lineWidth = 10;
+  ctx.beginPath(); ctx.moveTo(x - 20 * d, y - 140); ctx.lineTo(x - 34 * d, y - 90 + Math.sin(lady.walk) * 6); ctx.stroke();
+  const hx = x + 34 * d, hy = lady.eating ? y - 160 : armUp ? y - 100 : y - 90 - Math.sin(lady.walk) * 6;
+  ctx.beginPath(); ctx.moveTo(x + 20 * d, y - 140); ctx.lineTo(hx, hy); ctx.stroke();
+  // head
+  circle(x, y - 182, 34, "#5a3420");
+  circle(x, y - 175, 28, "#f2c29b");
+  ctx.fillStyle = "#5a3420"; ctx.beginPath(); ctx.arc(x, y - 186, 31, Math.PI, 0); ctx.fill();
+  circle(x - 30 * d, y - 165, 14, "#5a3420");
+  circle(x + 8 * d, y - 180, 3.5, "#222"); circle(x + 20 * d, y - 180, 3.5, "#222");
+  circle(x + 2 * d, y - 168, 5, "rgba(255,120,150,0.5)"); circle(x + 26 * d, y - 168, 5, "rgba(255,120,150,0.5)");
+  ctx.strokeStyle = "#b03050"; ctx.lineWidth = 3; ctx.beginPath();
+  if (lady.eating && Math.sin(lady.chew * 18) > 0) ctx.arc(x + 14 * d, y - 162, 6, 0, Math.PI * 2);
+  else ctx.arc(x + 14 * d, y - 166, 8, 0.2 * Math.PI, 0.8 * Math.PI);
+  ctx.stroke();
+  // what she's holding
+  if (lady.eating) emoji("🍍", hx + 6 * d, hy - 6, 50 * Math.max(0.2, lady.eat));
+  else if (basket > 0) {
+    ellipse(hx, hy + 12, 40, 18, "#c98a3b");
+    for (let i = 0; i < basket; i++) emoji("🍍", hx - 24 + (i % 2) * 24 + (i > 1 ? 12 : 0), hy - 8 - (i > 1 ? 18 : 0), 36);
+    ctx.fillStyle = "#a86e2c"; ctx.fillRect(hx - 40, hy + 8, 80, 16);
+  }
+}
+
+function drawCurly(t) {
+  const x = curly.x, d = curly.dir;
+  const hop = Math.sin(curly.jump * Math.PI) * 40 + (curly.walk ? Math.abs(Math.sin(curly.walk)) * 6 : 0);
+  const y = GROUND - hop;
+  ellipse(x, GROUND + 4, 55, 9, "rgba(0,0,0,0.15)");
+  const leg = curly.walk ? Math.sin(curly.walk) * 8 : 0;
+  for (const [dx, s] of [[-28, 1], [-14, -1], [18, 1], [32, -1]]) { ctx.fillStyle = "#151515"; ctx.fillRect(x + dx - 6 + leg * s, y - 30, 12, 30); }
+  // fluffy curly body
+  for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; circle(x + Math.cos(a) * 40, y - 52 + Math.sin(a) * 20, 17, "#1c1c1c"); }
+  ellipse(x, y - 52, 46, 26, "#222");
+  for (let i = 0; i < 7; i++) circle(x - 30 + i * 10, y - 60 + (i % 2) * 8, 5, "#333");
+  // tail
+  const wag = Math.sin(curly.wag) * 0.6;
+  ctx.save(); ctx.translate(x - 44 * d, y - 62); ctx.rotate(-0.8 * d + wag);
+  circle(0, -14, 9, "#1c1c1c"); circle(0, -26, 8, "#1c1c1c"); ctx.restore();
+  // head
+  const hx = x + 46 * d, hy = y - 82;
+  for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2; circle(hx + Math.cos(a) * 22, hy + Math.sin(a) * 20, 12, "#1c1c1c"); }
+  circle(hx, hy, 26, "#232323");
+  ellipse(hx + 22 * d, hy + 10, 16, 12, "#2c2c2c");
+  circle(hx + 34 * d, hy + 6, 6, "#000");
+  ellipse(hx - 16 * d, hy + 6, 10, 20, "#111", 0.3 * d);
+  circle(hx + 8 * d, hy - 6, 6, "#fff"); circle(hx + 9 * d, hy - 6, 3.5, "#000");
+  if (curly.happy > 0 || state === "give" || (curly.bowl.length && curly.bowl.some(b => b.s > 0)))
+    ellipse(hx + 24 * d, hy + 24, 6, 9, "#ff7b9c");
+  // bowl with his pineapples
+  if (curly.bowl.length) {
+    const bx = BOWL_X();
+    curly.bowl.forEach((b, i) => { if (b.s > 0) emoji("🍍", bx - 22 + i * 22, GROUND - 30, 44 * Math.max(0.25, b.s)); });
+    ctx.fillStyle = "#e5484d"; ctx.beginPath(); ctx.moveTo(bx - 45, GROUND - 22); ctx.lineTo(bx + 45, GROUND - 22); ctx.lineTo(bx + 34, GROUND); ctx.lineTo(bx - 34, GROUND); ctx.fill();
+  }
+  // name tag
+  ctx.font = 'bold 22px "Chalkboard SE","Comic Sans MS",sans-serif'; ctx.textAlign = "center"; ctx.fillStyle = "#1c1c1c";
+  ctx.fillText("Curly", x, y - 135);
+}
+
+function drawArrow(t) {
+  let target = null;
+  if (lady.cb) return;
+  if (state === "pick") { const p = treePines.find(p => p.s >= 1); if (p) target = [p.x, p.y - 50]; }
+  if (state === "give") target = [curly.x, GROUND - 170];
+  if (state === "ladyEat" && !lady.eating && basket === 1) target = [lady.x + 34 * lady.dir, GROUND - 160];
+  if (state === "poo" && poo) target = [poo.x, poo.y - 60];
+  if (state === "trash") target = [trash.x, GROUND - 190];
+  if (!target) return;
+  const b = Math.sin(t * 6) * 12;
+  ctx.save(); ctx.translate(target[0], target[1] + b);
+  ctx.fillStyle = "#ffcc00"; ctx.strokeStyle = "#ff7a00"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-26, -32); ctx.lineTo(-11, -32); ctx.lineTo(-11, -62); ctx.lineTo(11, -62); ctx.lineTo(11, -32); ctx.lineTo(26, -32); ctx.closePath();
+  ctx.fill(); ctx.stroke(); ctx.restore();
+}
+
+function drawHud() {
+  // four pineapple slots
+  ctx.fillStyle = "rgba(255,255,255,0.75)"; roundRect(20, 20, 300, 80, 24); ctx.fill();
+  const collected = state === "pick" ? basket : 0;
+  for (let i = 0; i < 4; i++) { ctx.globalAlpha = i < collected ? 1 : 0.25; emoji("🍍", 62 + i * 72, 60, 52); }
+  ctx.globalAlpha = 1;
+  // speaker button
+  circle(W - 60, 60, 38, "rgba(255,255,255,0.8)"); emoji("🔊", W - 60, 62, 40);
+  // message
+  if (message) {
+    ctx.font = 'bold 30px "Chalkboard SE","Comic Sans MS",sans-serif';
+    const w = Math.min(W - 80, ctx.measureText(message).width + 60);
+    ctx.fillStyle = "rgba(255,255,255,0.85)"; roundRect(W / 2 - w / 2, H - 92, w, 64, 30); ctx.fill();
+    ctx.fillStyle = "#3a2a10"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(message, W / 2, H - 60, W - 120);
+  }
+}
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+
+function draw(t) {
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = "#7ccc5a"; ctx.fillRect(0, 0, cv.width, cv.height); ctx.restore();
+  drawBackground(t); drawTree(); drawTrash();
+  if (poo && !poo.held) emoji("💩", poo.x, poo.y - 20 * poo.s, 56 * poo.s);
+  drawCurly(t); drawLady();
+  if (poo && poo.held) emoji("💩", poo.x, poo.y, 46);
+  for (const f of flyers) {
+    const k = Math.min(1, f.t), x = f.x0 + (f.x1 - f.x0) * k, y = f.y0 + (f.y1 - f.y0) * k - Math.sin(k * Math.PI) * 120;
+    emoji(f.emoji, x, y, f.size, k * 6);
+  }
+  for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life); circle(p.x, p.y, p.r, p.c); }
+  ctx.globalAlpha = 1;
+  drawArrow(t); drawHud();
+}
+
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  if (state !== "start") update(dt);
+  draw(now / 1000);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+document.getElementById("play").addEventListener("click", () => {
+  try { ac = new (window.AudioContext || window.webkitAudioContext)(); ac.resume(); } catch (e) {}
+  try { speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } catch (e) {}
+  document.getElementById("start").style.display = "none";
+  sfx.woof(); growPineapples(); setState("pick");
+});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
